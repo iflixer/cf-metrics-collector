@@ -19,10 +19,10 @@ import (
 )
 
 var (
-	apiToken      = ""
-	zoneTags      = []string{}
-	zoneTagsMutex = &sync.RWMutex{}
-	cfBase        = "https://api.cloudflare.com/client/v4"
+	apiToken     = ""
+	zoneIDs      = []string{}
+	zoneIDsMutex = &sync.RWMutex{}
+	cfBase       = "https://api.cloudflare.com/client/v4"
 
 	reqMetric = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
@@ -55,32 +55,32 @@ func init() {
 	prometheus.MustRegister(byStatusMetric)
 }
 
-func getZoneID(zoneTag string) (string, error) {
-	req, _ := http.NewRequest("GET", cfBase+"/zones?name="+zoneTag, nil)
-	req.Header.Set("Authorization", "Bearer "+apiToken)
-	req.Header.Set("Content-Type", "application/json")
+// func getZoneID(zoneTag string) (string, error) {
+// 	req, _ := http.NewRequest("GET", cfBase+"/zones?name="+zoneTag, nil)
+// 	req.Header.Set("Authorization", "Bearer "+apiToken)
+// 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
+// 	resp, err := http.DefaultClient.Do(req)
+// 	if err != nil {
+// 		return "", err
+// 	}
+// 	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(resp.Body)
-	var data struct {
-		Result []struct {
-			ID string `json:"id"`
-		} `json:"result"`
-	}
-	if err := json.Unmarshal(body, &data); err != nil || len(data.Result) == 0 {
-		return "", fmt.Errorf("failed to get zone ID for %s", zoneTag)
-	}
-	return data.Result[0].ID, nil
-}
+// 	body, _ := io.ReadAll(resp.Body)
+// 	var data struct {
+// 		Result []struct {
+// 			ID string `json:"id"`
+// 		} `json:"result"`
+// 	}
+// 	if err := json.Unmarshal(body, &data); err != nil || len(data.Result) == 0 {
+// 		return "", fmt.Errorf("failed to get zone ID for %s", zoneTag)
+// 	}
+// 	return data.Result[0].ID, nil
+// }
 
 func getAllZoneTags() ([]string, error) {
-	zoneTagsMutex.Lock()
-	defer zoneTagsMutex.Unlock()
+	zoneIDsMutex.Lock()
+	defer zoneIDsMutex.Unlock()
 	u := fmt.Sprintf("%s/zones?per_page=500", cfBase)
 	req, _ := http.NewRequest("GET", u, nil)
 	req.Header.Set("Authorization", "Bearer "+apiToken)
@@ -109,27 +109,28 @@ func getAllZoneTags() ([]string, error) {
 	if err := json.Unmarshal(body, &data); err != nil || len(data.Result) == 0 {
 		return nil, fmt.Errorf("failed to get all zones %s", err)
 	}
+	zoneIDs = []string{}
 	for _, zone := range data.Result {
 		if zone.Status == "active" {
-			zoneTags = append(zoneTags, zone.Name)
+			zoneIDs = append(zoneIDs, zone.ID)
 		}
 	}
-	if len(zoneTags) == 0 {
+	if len(zoneIDs) == 0 {
 		return nil, fmt.Errorf("no active zones found")
 	}
-	log.Println("[OK] Found zones:", len(zoneTags))
+	log.Println("[OK] Found zones:", len(zoneIDs))
 
-	return zoneTags, nil
+	return zoneIDs, nil
 }
 
-func fetchZoneStats(zoneTag string) {
-	zoneTagsMutex.RLock()
-	defer zoneTagsMutex.RUnlock()
-	zoneID, err := getZoneID(zoneTag)
-	if err != nil {
-		log.Printf("[!] Ошибка получения ID зоны %s: %v", zoneTag, err)
-		return
-	}
+func fetchZoneStats(zoneID string) {
+	zoneIDsMutex.RLock()
+	defer zoneIDsMutex.RUnlock()
+	// zoneID, err := getZoneID(zoneTag)
+	// if err != nil {
+	// 	log.Printf("[!] Ошибка получения ID зоны %s: %v", zoneTag, err)
+	// 	return
+	// }
 	log.Println("[OK] Loading zoneTag:zoneID", zoneTag, ":", zoneID)
 	today := time.Now().AddDate(0, 0, -7).Format("2006-01-02")
 	query := fmt.Sprintf(`{

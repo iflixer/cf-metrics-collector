@@ -1,5 +1,5 @@
 # build environment
-FROM --platform=linux/arm64 golang:1.23 AS build-env
+FROM golang:1.23 AS build-env
 WORKDIR /server
 COPY src/go.mod ./
 RUN go mod download
