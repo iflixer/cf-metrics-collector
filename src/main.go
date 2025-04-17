@@ -18,11 +18,16 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
+type Zone struct {
+	Tag string
+	ID  string
+}
+
 var (
-	apiToken     = ""
-	zoneIDs      = []string{}
-	zoneIDsMutex = &sync.RWMutex{}
-	cfBase       = "https://api.cloudflare.com/client/v4"
+	apiToken   = ""
+	zones      = []Zone{}
+	zonesMutex = &sync.RWMutex{}
+	cfBase     = "https://api.cloudflare.com/client/v4"
 
 	reqMetric = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
@@ -78,9 +83,7 @@ func init() {
 // 	return data.Result[0].ID, nil
 // }
 
-func getAllZoneTags() ([]string, error) {
-	zoneIDsMutex.Lock()
-	defer zoneIDsMutex.Unlock()
+func assignAllZones() error {
 	u := fmt.Sprintf("%s/zones?per_page=500", cfBase)
 	req, _ := http.NewRequest("GET", u, nil)
 	req.Header.Set("Authorization", "Bearer "+apiToken)
@@ -88,7 +91,7 @@ func getAllZoneTags() ([]string, error) {
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer resp.Body.Close()
 
@@ -107,35 +110,41 @@ func getAllZoneTags() ([]string, error) {
 		Success bool `json:"success"`
 	}
 	if err := json.Unmarshal(body, &data); err != nil || len(data.Result) == 0 {
-		return nil, fmt.Errorf("failed to get all zones %s", err)
+		return fmt.Errorf("failed to get all zones %s", err)
 	}
-	zoneIDs = []string{}
+	zonesCopy := []Zone{}
 	for _, zone := range data.Result {
 		if zone.Status == "active" {
-			zoneIDs = append(zoneIDs, zone.ID)
+			zoneCopy := Zone{
+				Tag: zone.Name,
+				ID:  zone.ID,
+			}
+			zonesCopy = append(zonesCopy, zoneCopy)
 		}
 	}
-	if len(zoneIDs) == 0 {
-		return nil, fmt.Errorf("no active zones found")
+	if len(zonesCopy) == 0 {
+		return fmt.Errorf("no active zones found")
 	}
-	log.Println("[OK] Found zones:", len(zoneIDs))
+	log.Println("[OK] Found zones:", len(zonesCopy))
 
-	return zoneIDs, nil
+	zonesMutex.Lock()
+	zones = zonesCopy
+	zonesMutex.Unlock()
+
+	return nil
 }
 
-func fetchZoneStats(zoneID string) {
-	zoneIDsMutex.RLock()
-	defer zoneIDsMutex.RUnlock()
+func fetchZoneStats(zone Zone) {
 	// zoneID, err := getZoneID(zoneTag)
 	// if err != nil {
 	// 	log.Printf("[!] Ошибка получения ID зоны %s: %v", zoneTag, err)
 	// 	return
 	// }
-	log.Println("[OK] Loading zoneTag:zoneID", zoneTag, ":", zoneID)
+	log.Println("[OK] Loading zoneTag:zoneID", zone.Tag, ":", zone.ID)
 	today := time.Now().AddDate(0, 0, -7).Format("2006-01-02")
 	query := fmt.Sprintf(`{
 		"query": "query { viewer { zones(filter: { zoneTag: \"%s\" }) { httpRequests1dGroups( filter: { date_geq: \"%s\" }, limit: 10, orderBy: [date_DESC]) { sum { requests cachedRequests responseStatusMap { edgeResponseStatus requests } } dimensions { date } } } } }"
-	}`, zoneID, today)
+	}`, zone.ID, today)
 
 	req, _ := http.NewRequest("POST", "https://api.cloudflare.com/client/v4/graphql", bytes.NewBuffer([]byte(query)))
 	req.Header.Set("Authorization", "Bearer "+apiToken)
@@ -143,7 +152,7 @@ func fetchZoneStats(zoneID string) {
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		log.Printf("[!] Ошибка Cloudflare GraphQL API для %s: %v", zoneTag, err)
+		log.Printf("[!] Ошибка Cloudflare GraphQL API для %s: %v", zone.Tag, err)
 		return
 	}
 	defer resp.Body.Close()
@@ -174,17 +183,17 @@ func fetchZoneStats(zoneID string) {
 	//log.Println("answer:", string(body))
 
 	if err := json.Unmarshal(body, &result); err != nil {
-		log.Printf("[!] Ошибка разбора GraphQL ответа для %s: %v", zoneTag, err)
+		log.Printf("[!] Ошибка разбора GraphQL ответа для %s: %v", zone.Tag, err)
 		return
 	}
 
 	for _, group := range result.Data.Viewer.Zones[0].HttpRequests1dGroups {
-		reqMetric.WithLabelValues(zoneTag, group.Dimensions.Date).Set(group.Sum.Requests)
-		cachedMetric.WithLabelValues(zoneTag, group.Dimensions.Date).Set(group.Sum.CachedRequests)
+		reqMetric.WithLabelValues(zone.Tag, group.Dimensions.Date).Set(group.Sum.Requests)
+		cachedMetric.WithLabelValues(zone.Tag, group.Dimensions.Date).Set(group.Sum.CachedRequests)
 		for _, status := range group.Sum.ResponseStatusMap {
 			EdgeResponseStatusStr := status.EdgeResponseStatus.String()
 			if EdgeResponseStatusStr != "" {
-				byStatusMetric.WithLabelValues(zoneTag, group.Dimensions.Date, EdgeResponseStatusStr).Set(status.Requests)
+				byStatusMetric.WithLabelValues(zone.Tag, group.Dimensions.Date, EdgeResponseStatusStr).Set(status.Requests)
 			}
 		}
 	}
@@ -203,7 +212,7 @@ func main() {
 
 	apiToken = os.Getenv("CLOUDFLARE_API_TOKEN")
 
-	zoneTags, err := getAllZoneTags()
+	err := assignAllZones()
 	if err != nil {
 		log.Println("[!] Ошибка получения всех зон:", err)
 		return
@@ -211,9 +220,12 @@ func main() {
 
 	go func() {
 		for {
-			for _, zoneTag := range zoneTags {
-				fetchZoneStats(zoneTag)
+			zonesMutex.RLock()
+			for _, zone := range zones {
+				fetchZoneStats(zone)
 			}
+			zonesMutex.RUnlock()
+
 			time.Sleep(5 * time.Minute)
 		}
 	}()
