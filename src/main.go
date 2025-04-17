@@ -19,10 +19,8 @@ import (
 )
 
 var (
-	apiToken = ""
-	zoneTags = []string{
-		"baskinohd.com",
-	}
+	apiToken      = ""
+	zoneTags      = []string{}
 	zoneTagsMutex = &sync.RWMutex{}
 	cfBase        = "https://api.cloudflare.com/client/v4"
 
@@ -111,7 +109,6 @@ func getAllZoneTags() ([]string, error) {
 	if err := json.Unmarshal(body, &data); err != nil || len(data.Result) == 0 {
 		return nil, fmt.Errorf("failed to get all zones %s", err)
 	}
-	zoneTags := make([]string, 0, len(data.Result))
 	for _, zone := range data.Result {
 		if zone.Status == "active" {
 			zoneTags = append(zoneTags, zone.Name)
