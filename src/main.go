@@ -34,7 +34,15 @@ var (
 			Name: "cloudflare_zone_requests_total",
 			Help: "Total requests per zone (GraphQL 1dGroups API)",
 		},
-		[]string{"zone_tag", "date"},
+		[]string{"zone_tag"},
+	)
+
+	pageViews = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "cloudflare_zone_page_views_total",
+			Help: "Page views per zone (GraphQL 1dGroups API)",
+		},
+		[]string{"zone_tag"},
 	)
 
 	cachedMetric = prometheus.NewGaugeVec(
@@ -42,7 +50,7 @@ var (
 			Name: "cloudflare_zone_cached_requests_total",
 			Help: "Cached requests per zone (GraphQL 1dGroups API)",
 		},
-		[]string{"zone_tag", "date"},
+		[]string{"zone_tag"},
 	)
 
 	byStatusMetric = prometheus.NewGaugeVec(
@@ -50,12 +58,13 @@ var (
 			Name: "cloudflare_zone_status_code_requests_total",
 			Help: "Requests per zone by HTTP status code",
 		},
-		[]string{"zone_tag", "date", "status_code"},
+		[]string{"zone_tag", "status_code"},
 	)
 )
 
 func init() {
 	prometheus.MustRegister(reqMetric)
+	prometheus.MustRegister(pageViews)
 	prometheus.MustRegister(cachedMetric)
 	prometheus.MustRegister(byStatusMetric)
 }
@@ -141,9 +150,9 @@ func fetchZoneStats(zone Zone) {
 	// 	return
 	// }
 	log.Println("[OK] Loading zoneTag:zoneID", zone.Tag, ":", zone.ID)
-	today := time.Now().AddDate(0, 0, -7).Format("2006-01-02")
+	today := time.Now().AddDate(0, 0, -1).Format("2006-01-02")
 	query := fmt.Sprintf(`{
-		"query": "query { viewer { zones(filter: { zoneTag: \"%s\" }) { httpRequests1dGroups( filter: { date_geq: \"%s\" }, limit: 10, orderBy: [date_DESC]) { sum { requests cachedRequests responseStatusMap { edgeResponseStatus requests } } dimensions { date } } } } }"
+		"query": "query { viewer { zones(filter: { zoneTag: \"%s\" }) { httpRequests1dGroups( filter: { date_geq: \"%s\" }, limit: 1, orderBy: [date_DESC]) { sum { requests cachedRequests pageViews responseStatusMap { edgeResponseStatus requests } } dimensions { date } } } } }"
 	}`, zone.ID, today)
 
 	req, _ := http.NewRequest("POST", "https://api.cloudflare.com/client/v4/graphql", bytes.NewBuffer([]byte(query)))
@@ -166,6 +175,7 @@ func fetchZoneStats(zone Zone) {
 						Sum struct {
 							Requests          float64 `json:"requests"`
 							CachedRequests    float64 `json:"cachedRequests"`
+							PageViews         float64 `json:"pageViews"`
 							ResponseStatusMap []struct {
 								EdgeResponseStatus json.Number `json:"edgeResponseStatus"`
 								Requests           float64     `json:"requests"`
@@ -180,20 +190,26 @@ func fetchZoneStats(zone Zone) {
 		} `json:"data"`
 	}
 
-	//log.Println("answer:", string(body))
-
 	if err := json.Unmarshal(body, &result); err != nil {
 		log.Printf("[!] Ошибка разбора GraphQL ответа для %s: %v", zone.Tag, err)
 		return
 	}
 
+	if len(result.Data.Viewer.Zones) == 0 || len(result.Data.Viewer.Zones[0].HttpRequests1dGroups) == 0 {
+		log.Printf("[!] Ошибка: нет данных для зоны %s", zone.Tag)
+		log.Println("[!] Ответ:", string(body))
+		log.Println("[!] Запрос:", query)
+		return
+	}
+
 	for _, group := range result.Data.Viewer.Zones[0].HttpRequests1dGroups {
-		reqMetric.WithLabelValues(zone.Tag, group.Dimensions.Date).Set(group.Sum.Requests)
-		cachedMetric.WithLabelValues(zone.Tag, group.Dimensions.Date).Set(group.Sum.CachedRequests)
+		reqMetric.WithLabelValues(zone.Tag).Set(group.Sum.Requests)
+		pageViews.WithLabelValues(zone.Tag).Set(group.Sum.PageViews)
+		cachedMetric.WithLabelValues(zone.Tag).Set(group.Sum.CachedRequests)
 		for _, status := range group.Sum.ResponseStatusMap {
 			EdgeResponseStatusStr := status.EdgeResponseStatus.String()
 			if EdgeResponseStatusStr != "" {
-				byStatusMetric.WithLabelValues(zone.Tag, group.Dimensions.Date, EdgeResponseStatusStr).Set(status.Requests)
+				byStatusMetric.WithLabelValues(zone.Tag, EdgeResponseStatusStr).Set(status.Requests)
 			}
 		}
 	}
